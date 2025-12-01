@@ -1,212 +1,226 @@
+import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional
 
-# -------------------------------
-# 1. 카테고리 정의
-# -------------------------------
+def build_category_lists(games_df: pd.DataFrame, users_df: pd.DataFrame):
+    # 장르 목록 (게임 + 유저 선호 장르에서 모두 수집)
+    genre_set = set(games_df["genre"].dropna().unique().tolist())
+    for gpref in users_df["preferred_genres"].dropna():
+        for g in str(gpref).split(";"):
+            g = g.strip()
+            if g:
+                genre_set.add(g)
+    genres = sorted(genre_set)
 
-AGE_BUCKETS = ["10s", "20s", "30s", "40s", "50s+"]  # 10대, 20대, ...
-GENDERS = ["M", "F"]
+    # 스토리 목록 (게임 + 유저 선호 스토리에서 모두 수집)
+    story_set = set()
+    for s in games_df["stories"].dropna():
+        for t in str(s).split(";"):
+            t = t.strip()
+            if t:
+                story_set.add(t)
+    for spref in users_df["preferred_stories"].dropna():
+        for t in str(spref).split(";"):
+            t = t.strip()
+            if t:
+                story_set.add(t)
+    stories = sorted(story_set)
 
-GENRES = [
-    "RPG", "FPS", "AOS", "Hyper-FPS", "Roguelike",
-    "Battle royale", "Survival", "Visual novel",
-    "Horror", "Sport", "Rhythm", "Racing"
-]
+    # 나이 버킷 (예: "10대", "20대"...)
+    age_buckets = sorted(users_df["age_group"].dropna().unique().tolist())
 
-STORIES = [
-    "fantasy", "mystery", "healing", "SF",
-    "romance", "modern", "period", "action",
-    "war", "sport"
-]
+    # 성별 (예: "남", "여")
+    genders = sorted(users_df["gender"].dropna().unique().tolist())
 
-
-# -------------------------------
-# 2. 유틸 함수: 인덱스 매핑
-# -------------------------------
-
-age2idx = {a: i for i, a in enumerate(AGE_BUCKETS)}
-gender2idx = {g: i for i, g in enumerate(GENDERS)}
-genre2idx = {g: i for i, g in enumerate(GENRES)}
-story2idx = {s: i for i, s in enumerate(STORIES)}
-
-
-# -------------------------------
-# 3. 벡터 인코딩 함수
-# -------------------------------
-
-def encode_age_bucket(age: int) -> np.ndarray:
-    """
-    실제 나이(int)를 받아서 AGE_BUCKETS 기준 one-hot으로 변환.
-    """
-    if age < 20:
-        bucket = "10s"
-    elif age < 30:
-        bucket = "20s"
-    elif age < 40:
-        bucket = "30s"
-    elif age < 50:
-        bucket = "40s"
-    else:
-        bucket = "50s+"
-
-    vec = np.zeros(len(AGE_BUCKETS), dtype=float)
-    vec[age2idx[bucket]] = 1.0
-    return vec
+    return age_buckets, genders, genres, stories
 
 
-def encode_age_bucket_from_bucket(bucket: str) -> np.ndarray:
-    """
-    이미 "20s", "30s" 같은 버킷 문자열이 있을 때.
-    """
-    vec = np.zeros(len(AGE_BUCKETS), dtype=float)
-    if bucket in age2idx:
-        vec[age2idx[bucket]] = 1.0
-    return vec
+class GameRecommenderFromFile:
+    def __init__(self, excel_path: str):
+        self.excel_path = excel_path
+        self.games_df = pd.read_excel(excel_path, sheet_name="games")
+        self.users_df = pd.read_excel(excel_path, sheet_name="users")
 
+        (
+            self.AGE_BUCKETS,
+            self.GENDERS,
+            self.GENRES,
+            self.STORIES,
+        ) = build_category_lists(self.games_df, self.users_df)
 
-def encode_gender(gender: str) -> np.ndarray:
-    """
-    gender: "M" 또는 "F"
-    """
-    vec = np.zeros(len(GENDERS), dtype=float)
-    if gender in gender2idx:
-        vec[gender2idx[gender]] = 1.0
-    return vec
+        # 카테고리 → 인덱스 매핑
+        self.age2idx = {a: i for i, a in enumerate(self.AGE_BUCKETS)}
+        self.gender2idx = {g: i for i, g in enumerate(self.GENDERS)}
+        self.genre2idx = {g: i for i, g in enumerate(self.GENRES)}
+        self.story2idx = {s: i for i, s in enumerate(self.STORIES)}
 
+        self.SIM_DIM = (
+            len(self.AGE_BUCKETS)
+            + len(self.GENDERS)
+            + len(self.GENRES)
+            + len(self.STORIES)
+        )
 
-def encode_gender_ratio(male_ratio: float) -> np.ndarray:
-    """
-    게임 이용자 성별 비율을 [male_ratio, female_ratio]로 표현.
-    male_ratio: 0~1
-    """
-    male = np.clip(male_ratio, 0.0, 1.0)
-    female = 1.0 - male
-    return np.array([male, female], dtype=float)
+        # 게임 벡터 & 인기 점수 미리 계산
+        self.game_vectors: Dict[str, np.ndarray] = {}
+        self.popularity: Dict[str, float] = {}
+        self._build_games()
 
+    # ---------------- 인코딩 유틸 ----------------
 
-def encode_multi_hot(items: List[str], mapping: Dict[str, int], size: int, normalize=True) -> np.ndarray:
-    """
-    장르/스토리처럼 여러 개 선택 가능한 것을 multi-hot으로 인코딩.
-    normalize=True면 합이 1이 되도록 정규화.
-    """
-    vec = np.zeros(size, dtype=float)
-    for item in items:
+    def _encode_age_bucket_from_group(self, age_group: str) -> np.ndarray:
+        vec = np.zeros(len(self.AGE_BUCKETS), dtype=float)
+        if age_group in self.age2idx:
+            vec[self.age2idx[age_group]] = 1.0
+        return vec
+
+    def _encode_gender(self, gender: str) -> np.ndarray:
+        vec = np.zeros(len(self.GENDERS), dtype=float)
+        if gender in self.gender2idx:
+            vec[self.gender2idx[gender]] = 1.0
+        return vec
+
+    def _encode_gender_ratio_from_trend(self, trend: str) -> np.ndarray:
+        """
+        games.gender_trend (Male-dominant / Female-dominant / Balanced)
+        를 대략적인 남성비율로 매핑
+        """
+        trend = str(trend)
+        if trend == "Male-dominant":
+            male_ratio = 0.8
+        elif trend == "Female-dominant":
+            male_ratio = 0.2
+        elif trend == "Balanced":
+            male_ratio = 0.5
+        else:
+            male_ratio = 0.5
+        male = np.clip(male_ratio, 0.0, 1.0)
+        female = 1.0 - male
+        return np.array([male, female], dtype=float)
+
+    def _encode_multi_hot(
+        self,
+        items_str: str,
+        mapping: Dict[str, int],
+        size: int,
+        normalize=True,
+    ) -> np.ndarray:
+        vec = np.zeros(size, dtype=float)
+        if pd.isna(items_str):
+            return vec
+        for item in str(items_str).split(";"):
+            item = item.strip()
+            if item and item in mapping:
+                vec[mapping[item]] = 1.0
+        if normalize and vec.sum() > 0:
+            vec = vec / vec.sum()
+        return vec
+
+    def _encode_single_hot(self, item: str, mapping: Dict[str, int], size: int) -> np.ndarray:
+        vec = np.zeros(size, dtype=float)
+        if pd.isna(item):
+            return vec
+        item = str(item).strip()
         if item in mapping:
             vec[mapping[item]] = 1.0
-    if normalize and vec.sum() > 0:
-        vec = vec / vec.sum()
-    return vec
+        return vec
 
+    # ---------------- 유저/게임 벡터 ----------------
 
-def encode_single_hot(item: str, mapping: Dict[str, int], size: int) -> np.ndarray:
-    """
-    장르처럼 하나만 선택하는 경우 (one-hot).
-    """
-    vec = np.zeros(size, dtype=float)
-    if item in mapping:
-        vec[mapping[item]] = 1.0
-    return vec
-
-
-# -------------------------------
-# 4. 유저/게임 벡터 구조
-#    - 유사도 계산에 사용할 공통 공간
-#      [age_bucket, gender, genres, stories]
-# -------------------------------
-
-SIM_DIM = len(AGE_BUCKETS) + len(GENDERS) + len(GENRES) + len(STORIES)
-
-
-def encode_user_for_similarity(user_profile: Dict) -> np.ndarray:
-    """
-    user_profile 예시:
-    {
-        "age": 22,
-        "gender": "M",
-        "preferred_genres": ["RPG", "Roguelike"],
-        "preferred_stories": ["fantasy", "romance"]
-    }
-    """
-    # 1) 나이 버킷
-    age_vec = encode_age_bucket(user_profile["age"])
-
-    # 2) 성별
-    gender_vec = encode_gender(user_profile["gender"])
-
-    # 3) 선호 장르 (multi-hot 정규화)
-    pref_genres = user_profile.get("preferred_genres", [])
-    genre_vec = encode_multi_hot(pref_genres, genre2idx, len(GENRES), normalize=True)
-
-    # 4) 선호 스토리 (multi-hot 정규화)
-    pref_stories = user_profile.get("preferred_stories", [])
-    story_vec = encode_multi_hot(pref_stories, story2idx, len(STORIES), normalize=True)
-
-    return np.concatenate([age_vec, gender_vec, genre_vec, story_vec])
-
-
-def encode_game_for_similarity(game_info: Dict) -> np.ndarray:
-    """
-    game_info 예시:
-    {
-        "game_id": "game_1",
-        "name": "Awesome RPG",
-        "genre": "RPG",                  # 단일 장르
-        "stories": ["fantasy", "war"],   # 다중 스토리
-        "avg_user_age": 24.7,            # 평균 이용자 나이
-        "male_ratio": 0.7,               # 남성 비율 (0~1)
-        "avg_user_count": 12345          # (여기선 유사도에 안 쓰고 popularity에 사용)
-    }
-    """
-    # 1) 평균 이용자 나이 → 버킷
-    age_vec = encode_age_bucket(int(game_info["avg_user_age"]))
-
-    # 2) 성별 비율
-    gender_vec = encode_gender_ratio(game_info["male_ratio"])
-
-    # 3) 장르 (one-hot)
-    genre_vec = encode_single_hot(game_info["genre"], genre2idx, len(GENRES))
-
-    # 4) 스토리 (multi-hot, 정규화 X / 그냥 존재만 표시)
-    stories = game_info.get("stories", [])
-    story_vec = encode_multi_hot(stories, story2idx, len(STORIES), normalize=False)
-
-    return np.concatenate([age_vec, gender_vec, genre_vec, story_vec])
-
-
-# -------------------------------
-# 5. 코사인 유사도
-# -------------------------------
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    if np.all(a == 0) or np.all(b == 0):
-        return 0.0
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-
-# -------------------------------
-# 6. 추천 시스템 클래스
-# -------------------------------
-
-class GameRecommender:
-    def __init__(self, games: List[Dict]):
+    def _encode_user_for_similarity(self, user_row: pd.Series) -> np.ndarray:
         """
-        games: 각 게임 정보 딕셔너리 리스트
-        (encode_game_for_similarity 형식 참고)
+        users 시트 한 행을 받아서 유저 벡터로 변환
         """
-        self.games = games
-        self.game_vectors = {}
-        self.popularity = {}
-        self._build(games)
+        age_vec = self._encode_age_bucket_from_group(user_row["age_group"])
+        gender_vec = self._encode_gender(user_row["gender"])
 
-    def _build(self, games: List[Dict]):
-        # 1) 게임 벡터 미리 인코딩
-        for g in games:
-            gid = g["game_id"]
-            self.game_vectors[gid] = encode_game_for_similarity(g)
+        genre_vec = self._encode_multi_hot(
+            user_row.get("preferred_genres", ""),
+            self.genre2idx,
+            len(self.GENRES),
+            normalize=True,
+        )
 
-        # 2) 인기 점수(popularity) 정규화
-        counts = np.array([g.get("avg_user_count", 0) for g in games], dtype=float)
+        story_vec = self._encode_multi_hot(
+            user_row.get("preferred_stories", ""),
+            self.story2idx,
+            len(self.STORIES),
+            normalize=True,
+        )
+
+        return np.concatenate([age_vec, gender_vec, genre_vec, story_vec])
+
+    def _encode_game_for_similarity(self, game_row: pd.Series) -> np.ndarray:
+        """
+        games 시트 한 행을 받아서 게임 벡터로 변환
+        """
+        # 평균 이용자 나이 → 나이대 버킷으로 근사
+        avg_age = game_row.get("avg_user_age", np.nan)
+        if pd.isna(avg_age):
+            # 값 없으면 중간 나이대로
+            mid_idx = len(self.AGE_BUCKETS) // 2
+            age_vec = np.zeros(len(self.AGE_BUCKETS), dtype=float)
+            age_vec[mid_idx] = 1.0
+        else:
+            try:
+                age_val = float(avg_age)
+            except Exception:
+                age_val = 25.0
+
+            # 대강 10대/20대/... 나누기
+            if age_val < 20:
+                age_group = "10대"
+            elif age_val < 30:
+                age_group = "20대"
+            elif age_val < 40:
+                age_group = "30대"
+            elif age_val < 50:
+                age_group = "40대"
+            else:
+                age_group = "50대"
+
+            if age_group not in self.age2idx:
+                age_vec = np.zeros(len(self.AGE_BUCKETS), dtype=float)
+                mid_idx = len(self.AGE_BUCKETS) // 2
+                age_vec[mid_idx] = 1.0
+            else:
+                age_vec = self._encode_age_bucket_from_group(age_group)
+
+        gender_vec = self._encode_gender_ratio_from_trend(
+            game_row.get("gender_trend", "")
+        )
+
+        genre_vec = self._encode_single_hot(
+            game_row.get("genre", ""),
+            self.genre2idx,
+            len(self.GENRES),
+        )
+
+        story_vec = self._encode_multi_hot(
+            game_row.get("stories", ""),
+            self.story2idx,
+            len(self.STORIES),
+            normalize=False,
+        )
+
+        return np.concatenate([age_vec, gender_vec, genre_vec, story_vec])
+
+    @staticmethod
+    def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+        if np.all(a == 0) or np.all(b == 0):
+            return 0.0
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+    # ---------------- 게임 테이블 빌드 ----------------
+
+    def _build_games(self):
+        # 게임 벡터 미리 계산
+        for _, row in self.games_df.iterrows():
+            gid = row["game_id"]
+            self.game_vectors[gid] = self._encode_game_for_similarity(row)
+
+        # 인기 점수 (avg_user_count 정규화)
+        counts = self.games_df["avg_user_count"].fillna(0).to_numpy(dtype=float)
         if len(counts) > 0:
             min_c, max_c = counts.min(), counts.max()
             if max_c == min_c:
@@ -216,64 +230,78 @@ class GameRecommender:
         else:
             norm_counts = np.array([])
 
-        for g, c in zip(games, norm_counts):
-            gid = g["game_id"]
+        for (idx, row), c in zip(self.games_df.iterrows(), norm_counts):
+            gid = row["game_id"]
             self.popularity[gid] = float(c)
 
-    def recommend(
+    # ---------------- 추천 함수 ----------------
+
+    def recommend_for_user(
         self,
-        user_profile: Dict,
-        last_game_id: Optional[str] = None,
+        user_id: str,
         top_k: int = 10,
         w_user: float = 0.6,
         w_last: float = 0.2,
         w_pop: float = 0.2,
-    ) -> List[Dict]:
+    ):
         """
-        유저 프로필과 (선택) 마지막 플레이 게임을 기반으로
-        상위 top_k개 게임을 추천.
-
-        w_user + w_last + w_pop ≈ 1 이도록 사용하는 걸 권장.
-        last_game_id가 없으면 w_last는 무시됨.
+        주어진 user_id에 대해 상위 top_k개 게임을 추천.
+        users 시트의 game_id는 '마지막으로 플레이한 게임'이라고 가정.
         """
-        user_vec = encode_user_for_similarity(user_profile)
+        user_rows = self.users_df[self.users_df["user_id"] == user_id]
+        if user_rows.empty:
+            raise ValueError(f"user_id {user_id} not found")
 
-        # 마지막 게임 벡터 (있다면)
+        user_row = user_rows.iloc[0]
+        user_vec = self._encode_user_for_similarity(user_row)
+
+        # 마지막 플레이 게임
+        last_game_id = user_row.get("game_id", None)
         last_vec = None
-        if last_game_id is not None and last_game_id in self.game_vectors:
+        if isinstance(last_game_id, str) and last_game_id in self.game_vectors:
             last_vec = self.game_vectors[last_game_id]
         else:
-            # last_game 없으면 last weight를 0으로
+            # 없으면 w_last를 w_user로 합치기
             w_user = w_user + w_last
             w_last = 0.0
 
         scores = []
-        for g in self.games:
-            gid = g["game_id"]
+        for _, g_row in self.games_df.iterrows():
+            gid = g_row["game_id"]
             gvec = self.game_vectors[gid]
 
-            # 1) 유저-게임 유사도
-            sim_user = cosine_similarity(user_vec, gvec)
-
-            # 2) 마지막 게임과 유사도
+            sim_user = self._cosine_similarity(user_vec, gvec)
             sim_last = 0.0
             if last_vec is not None:
-                sim_last = cosine_similarity(last_vec, gvec)
-
-            # 3) 인기 점수
+                sim_last = self._cosine_similarity(last_vec, gvec)
             pop = self.popularity.get(gid, 0.0)
 
-            # 4) 최종 점수
             score = w_user * sim_user + w_last * sim_last + w_pop * pop
-            scores.append((score, g))
+            scores.append((score, g_row))
 
-        # 점수 기준 내림차순 정렬
         scores.sort(key=lambda x: x[0], reverse=True)
 
-        # 상위 top_k 게임 정보 + 점수 리턴
-        result = []
-        for s, g in scores[:top_k]:
-            item = g.copy()
-            item["score"] = s
-            result.append(item)
-        return result
+        results = []
+        for s, row in scores[:top_k]:
+            info = row.to_dict()
+            info["score"] = s
+            results.append(info)
+        return results
+
+
+if __name__ == "__main__":
+    # 엑셀 파일 경로 (스크립트와 같은 폴더에 있으면 이렇게)
+    excel_path = "game_user_dataset.xlsx"
+
+    recommender = GameRecommenderFromFile(excel_path)
+
+    # 샘플: 첫 번째 유저 기준으로 5개 추천
+    sample_user_id = recommender.users_df["user_id"].iloc[0]
+    recs = recommender.recommend_for_user(sample_user_id, top_k=5)
+
+    print(f"추천 대상 유저: {sample_user_id}")
+    for r in recs:
+        print(
+            f"{r['game_id']} | {r['game_name']} | genre={r['genre']} | "
+            f"stories={r['stories']} | score={r['score']:.4f}"
+        )
