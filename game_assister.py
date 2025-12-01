@@ -289,7 +289,7 @@ class GameRecommenderFromFile:
             results.append(info)
         return results
 
-    # ---------------- ★ 전체 유저 추천 엑셀 출력 ----------------
+        # ---------------- ★ 전체 유저 추천 엑셀 출력 (가로로 정렬 버전) ----------------
 
     def export_all_recommendations(
         self,
@@ -301,8 +301,11 @@ class GameRecommenderFromFile:
     ):
         """
         모든 유저에 대해 상위 top_k개 추천 게임을 계산하고
-        결과를 엑셀 파일로 저장.
-        output_path: 예) "user_game_recommendations.xlsx"
+        각 유저를 한 행에, 추천 게임들을 열(column)로 늘어놓아 엑셀로 저장.
+
+        예시 컬럼:
+        user_id, rec1_game_id, rec1_game_name, rec1_genre, rec1_score,
+                 rec2_game_id, rec2_game_name, ...
         """
         records = []
 
@@ -321,26 +324,24 @@ class GameRecommenderFromFile:
                 print(f"[WARN] user {uid} 추천 중 오류 발생: {e}")
                 continue
 
+            row = {"user_id": uid}
+
+            # 순위별 추천 게임을 rec1_*, rec2_* ... 형식으로 넣기
             for rank, r in enumerate(recs, start=1):
-                records.append(
-                    {
-                        "user_id": uid,
-                        "rank": rank,
-                        "game_id": r.get("game_id"),
-                        "game_name": r.get("game_name"),
-                        "genre": r.get("genre"),
-                        "stories": r.get("stories"),
-                        "score": r.get("score"),
-                    }
-                )
+                prefix = f"rec{rank}_"
+                row[prefix + "game_id"] = r.get("game_id")
+                row[prefix + "game_name"] = r.get("game_name")
+                row[prefix + "genre"] = r.get("genre")
+                row[prefix + "stories"] = r.get("stories")
+                row[prefix + "score"] = r.get("score")
+
+            records.append(row)
 
         if not records:
             print("추천 결과가 없습니다. (records 비어 있음)")
             return
 
         df_out = pd.DataFrame(records)
-
-        # 엑셀로 저장 (같은 폴더에 생성됨)
         df_out.to_excel(output_path, index=False)
         print(f"✅ 추천 결과 엑셀 파일 생성 완료: {output_path}")
 
