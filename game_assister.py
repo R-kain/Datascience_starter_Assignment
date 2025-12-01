@@ -354,12 +354,27 @@ if __name__ == "__main__":
     # 추천기 생성
     recommender = GameRecommenderFromFile(excel_path)
 
-    # 모든 유저에 대해 상위 5개 추천 → 엑셀로 저장
+    # 모든 유저에 대해 상위 2개 추천 → 엑셀로 저장
     output_file = "user_game_recommendations.xlsx"
-    recommender.export_all_recommendations(
-        output_path=output_file,
-        top_k=5,          # 유저당 추천 게임 개수
-        w_user=0.6,
-        w_last=0.2,
-        w_pop=0.2,
-    )
+    
+    print("=" * 50)
+    print("게임 추천 시스템 시작")
+    print("=" * 50)
+    print(f"입력 파일: {excel_path}")
+    print(f"출력 파일: {output_file}")
+    print(f"유저당 추천 게임 수: 2개")
+    print("=" * 50)
+    
+    try:
+        recommender.export_all_recommendations(
+            output_path=output_file,
+            top_k=2,          # 유저당 추천 게임 개수
+            w_user=0.6,
+            w_last=0.2,
+            w_pop=0.2,
+        )
+        print(f"\n✅ 성공! '{output_file}' 파일이 생성되었습니다.")
+    except Exception as e:
+        print(f"\n❌ 오류 발생: {e}")
+        import traceback
+        traceback.print_exc()
