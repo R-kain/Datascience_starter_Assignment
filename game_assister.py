@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional
 
+
 def build_category_lists(games_df: pd.DataFrame, users_df: pd.DataFrame):
     # 장르 목록 (게임 + 유저 선호 장르에서 모두 수집)
     genre_set = set(games_df["genre"].dropna().unique().tolist())
@@ -167,7 +168,7 @@ class GameRecommenderFromFile:
             except Exception:
                 age_val = 25.0
 
-            # 대강 10대/20대/... 나누기
+            # 대강 10대/20대/... 나누기 (엑셀에 맞게 수정해도 됨)
             if age_val < 20:
                 age_group = "10대"
             elif age_val < 30:
@@ -234,7 +235,7 @@ class GameRecommenderFromFile:
             gid = row["game_id"]
             self.popularity[gid] = float(c)
 
-    # ---------------- 추천 함수 ----------------
+    # ---------------- 단일 유저 추천 ----------------
 
     def recommend_for_user(
         self,
@@ -288,20 +289,77 @@ class GameRecommenderFromFile:
             results.append(info)
         return results
 
+    # ---------------- ★ 전체 유저 추천 엑셀 출력 ----------------
+
+    def export_all_recommendations(
+        self,
+        output_path: str,
+        top_k: int = 5,
+        w_user: float = 0.6,
+        w_last: float = 0.2,
+        w_pop: float = 0.2,
+    ):
+        """
+        모든 유저에 대해 상위 top_k개 추천 게임을 계산하고
+        결과를 엑셀 파일로 저장.
+        output_path: 예) "user_game_recommendations.xlsx"
+        """
+        records = []
+
+        user_ids = self.users_df["user_id"].unique().tolist()
+
+        for uid in user_ids:
+            try:
+                recs = self.recommend_for_user(
+                    uid,
+                    top_k=top_k,
+                    w_user=w_user,
+                    w_last=w_last,
+                    w_pop=w_pop,
+                )
+            except Exception as e:
+                print(f"[WARN] user {uid} 추천 중 오류 발생: {e}")
+                continue
+
+            for rank, r in enumerate(recs, start=1):
+                records.append(
+                    {
+                        "user_id": uid,
+                        "rank": rank,
+                        "game_id": r.get("game_id"),
+                        "game_name": r.get("game_name"),
+                        "genre": r.get("genre"),
+                        "stories": r.get("stories"),
+                        "score": r.get("score"),
+                    }
+                )
+
+        if not records:
+            print("추천 결과가 없습니다. (records 비어 있음)")
+            return
+
+        df_out = pd.DataFrame(records)
+
+        # 엑셀로 저장 (같은 폴더에 생성됨)
+        df_out.to_excel(output_path, index=False)
+        print(f"✅ 추천 결과 엑셀 파일 생성 완료: {output_path}")
+
+
+# ---------------- 메인 실행부 ----------------
 
 if __name__ == "__main__":
-    # 엑셀 파일 경로 (스크립트와 같은 폴더에 있으면 이렇게)
+    # 같은 폴더에 있는 원본 데이터 파일 이름
     excel_path = "game_user_dataset.xlsx"
 
+    # 추천기 생성
     recommender = GameRecommenderFromFile(excel_path)
 
-    # 샘플: 첫 번째 유저 기준으로 5개 추천
-    sample_user_id = recommender.users_df["user_id"].iloc[0]
-    recs = recommender.recommend_for_user(sample_user_id, top_k=5)
-
-    print(f"추천 대상 유저: {sample_user_id}")
-    for r in recs:
-        print(
-            f"{r['game_id']} | {r['game_name']} | genre={r['genre']} | "
-            f"stories={r['stories']} | score={r['score']:.4f}"
-        )
+    # 모든 유저에 대해 상위 5개 추천 → 엑셀로 저장
+    output_file = "user_game_recommendations.xlsx"
+    recommender.export_all_recommendations(
+        output_path=output_file,
+        top_k=5,          # 유저당 추천 게임 개수
+        w_user=0.6,
+        w_last=0.2,
+        w_pop=0.2,
+    )
